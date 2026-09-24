@@ -2,7 +2,7 @@ use crate::{Decoder, Value};
 
 fn assert_bytes(input: &[u8], expected: &[u8]) {
     match Decoder::new(input).decode() {
-        Ok(Value::ByteString(actual)) => {
+        Ok(Value::Bytes(actual)) => {
             assert_eq!(actual, expected, "incorrect bytes for input: {input:?}");
         }
         _ => panic!("expected valid bytes for input: {input:?}"),

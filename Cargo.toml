@@ -7,4 +7,5 @@ authors = [
 ]
 
 [dependencies]
+bytes = "1.12"
 thiserror = "2"

@@ -1,17 +1,19 @@
 use crate::{DecodeError, bencode::Value};
 
-/// Decodes supported Bencode values from a borrowed input buffer.
+/// Decodes supported Bencode values from an input buffer.
 ///
-/// The decoder borrows byte-string payloads directly from the input. Each
-/// parsing operation returns the next unread byte so values can be decoded
-/// sequentially inside containers.
+/// The decoder borrows the input while parsing, but copies each byte-string
+/// payload into owned [`bytes::Bytes`] storage. Decoded values can therefore
+/// outlive both the decoder and the input buffer. Each parsing operation
+/// returns the next unread byte so values can be decoded sequentially inside
+/// containers.
 pub struct Decoder<'a> {
     /// The complete encoded input being decoded.
     input: &'a [u8],
 }
 
 /// A decoded value and the absolute offset of the next unread input byte.
-type ParseResult<'a> = Result<(Value<'a>, usize), DecodeError>;
+type ParseResult<'a> = Result<(Value, usize), DecodeError>;
 
 impl<'a> Decoder<'a> {
     /// Creates a decoder that borrows `input` for the lifetime `'a`.
@@ -22,13 +24,14 @@ impl<'a> Decoder<'a> {
     /// Decodes exactly one complete Bencode value.
     ///
     /// Integers, byte strings, and lists are supported. Lists may contain any
-    /// supported value recursively. Byte-string payloads borrow from the input.
+    /// supported value recursively. Byte-string payloads are copied into owned
+    /// [`bytes::Bytes`] values; the decoded value does not borrow from the input.
     ///
     /// # Errors
     ///
     /// Returns an error for empty input, unsupported value markers, malformed
     /// values, incomplete input, or bytes remaining after the decoded value.
-    pub fn decode(&self) -> Result<Value<'a>, DecodeError> {
+    pub fn decode(&self) -> Result<Value, DecodeError> {
         if self.input.is_empty() {
             return Err(DecodeError::EmptyInput);
         }
@@ -139,7 +142,10 @@ impl<'a> Decoder<'a> {
         }
 
         let next_offset = offset + separator + 1 + length;
-        Ok((Value::ByteString(&payload[..length]), next_offset))
+        Ok((
+            Value::Bytes(bytes::Bytes::copy_from_slice(&payload[..length])),
+            next_offset,
+        ))
     }
 
     /// Parses a list beginning at `offset` and returns the offset after `e`.

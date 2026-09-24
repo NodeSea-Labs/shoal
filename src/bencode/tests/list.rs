@@ -1,6 +1,10 @@
 use crate::{DecodeError, Decoder, Value};
 
-fn assert_list(input: &[u8], expected: Vec<Value<'_>>) {
+fn new_bytes(v: &[u8]) -> Value {
+    Value::Bytes(bytes::Bytes::copy_from_slice(v))
+}
+
+fn assert_list(input: &[u8], expected: Vec<Value>) {
     let decoded = Decoder::new(input).decode();
     assert_eq!(decoded, Ok(Value::List(expected)), "input: {input:?}");
 }
@@ -19,17 +23,13 @@ fn list_decodes_adjacent_values() {
 fn list_decodes_mixed_values() {
     assert_list(
         b"li1e1:a0:e",
-        vec![
-            Value::Integer(1),
-            Value::ByteString(b"a"),
-            Value::ByteString(b""),
-        ],
+        vec![Value::Integer(1), new_bytes(b"a"), new_bytes(b"")],
     );
 }
 
 #[test]
 fn list_preserves_bencode_markers_in_byte_string_payload() {
-    assert_list(b"l3:eiee", vec![Value::ByteString(b"eie")]);
+    assert_list(b"l3:eiee", vec![new_bytes(b"eie")]);
 }
 
 #[test]
@@ -56,10 +56,7 @@ fn list_rejects_every_incomplete_prefix() {
 
     assert_list(
         input,
-        vec![
-            Value::List(vec![Value::Integer(1)]),
-            Value::ByteString(b"a"),
-        ],
+        vec![Value::List(vec![Value::Integer(1)]), new_bytes(b"a")],
     );
 }
 
