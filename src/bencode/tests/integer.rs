@@ -175,6 +175,14 @@ fn integer_extra_bytes() {
 }
 
 #[test]
+fn integer_reports_trailing_bytes_after_terminator() {
+    assert_eq!(
+        Decoder::new(b"i1ee").decode(),
+        Err(crate::DecodeError::TrailingData { remaining: 1 })
+    );
+}
+
+#[test]
 fn integer_truncated_input() {
     let valid = b"i-9223372036854775808e";
 
