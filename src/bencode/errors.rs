@@ -25,7 +25,7 @@ pub enum DecodeError {
     #[error("Bencode byte-string length is outside the usize range")]
     ByteStringLengthOutOfRange,
 
-    /// The declared byte-string payload is shorter than the input provides.
+    /// The input contains fewer payload bytes than the byte-string length declares.
     #[error("incomplete byte string: expected {expected} bytes, got {actual}")]
     UnexpectedEndOfInput { expected: usize, actual: usize },
 

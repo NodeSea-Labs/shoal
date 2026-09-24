@@ -10,6 +10,9 @@ pub struct Decoder<'a> {
     input: &'a [u8],
 }
 
+/// A decoded value borrowing from the input, or the reason decoding failed.
+type ParseResult<'a> = Result<Value<'a>, DecodeError>;
+
 impl<'a> Decoder<'a> {
     /// Creates a decoder that borrows `input` for the lifetime `'a`.
     pub fn new(input: &'a [u8]) -> Self {
@@ -21,7 +24,14 @@ impl<'a> Decoder<'a> {
     /// The returned byte string borrows its payload from the input buffer.
     /// The first byte selects the value parser; unsupported markers are
     /// reported separately from malformed integer or byte-string encodings.
-    pub fn decode(&self) -> Result<Value<'a>, DecodeError> {
+    ///
+    /// # Errors
+    ///
+    /// Returns [`DecodeError::EmptyInput`] for an empty buffer,
+    /// [`DecodeError::UnsupportedType`] for an unsupported value marker, or a
+    /// more specific error when the selected value is malformed, out of range,
+    /// incomplete, or followed by extra bytes.
+    pub fn decode(&self) -> ParseResult<'a> {
         let Some(&prefix) = self.input.first() else {
             return Err(DecodeError::EmptyInput);
         };
@@ -39,7 +49,7 @@ impl<'a> Decoder<'a> {
     /// and negative zero are rejected so a number has only one valid encoding;
     /// values outside `i64` are rejected because [`Value::Integer`] stores an
     /// `i64`.
-    fn parse_integer(input: &'a [u8]) -> Result<Value<'a>, DecodeError> {
+    fn parse_integer(input: &'a [u8]) -> ParseResult<'a> {
         if !input.starts_with(b"i") || !input.ends_with(b"e") {
             return Err(DecodeError::InvalidInteger);
         }
@@ -68,7 +78,7 @@ impl<'a> Decoder<'a> {
     /// kept as arbitrary bytes, and its length must match the prefix exactly;
     /// this prevents payload contents from being interpreted as syntax and
     /// prevents trailing input from being silently accepted.
-    fn parse_byte_string(input: &'a [u8]) -> Result<Value<'a>, DecodeError> {
+    fn parse_byte_string(input: &'a [u8]) -> ParseResult<'a> {
         let Some(separator) = input.iter().position(|&byte| byte == b':') else {
             return Err(DecodeError::InvalidByteStringLength);
         };
