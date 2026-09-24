@@ -1,17 +1,17 @@
 use crate::{DecodeError, bencode::Value};
 
-/// Decodes one supported Bencode value from a borrowed input buffer.
+/// Decodes supported Bencode values from a borrowed input buffer.
 ///
-/// The decoder borrows the input so byte-string values can refer to their
-/// payload without allocating or copying it. A decoder consumes exactly one
-/// complete value; trailing bytes are reported as an error.
+/// The decoder borrows byte-string payloads directly from the input. Each
+/// parsing operation returns the next unread byte so values can be decoded
+/// sequentially inside containers.
 pub struct Decoder<'a> {
-    /// The complete encoded value being decoded.
+    /// The complete encoded input being decoded.
     input: &'a [u8],
 }
 
-/// A decoded value borrowing from the input, or the reason decoding failed.
-type ParseResult<'a> = Result<Value<'a>, DecodeError>;
+/// A decoded value and the absolute offset of the next unread input byte.
+type ParseResult<'a> = Result<(Value<'a>, usize), DecodeError>;
 
 impl<'a> Decoder<'a> {
     /// Creates a decoder that borrows `input` for the lifetime `'a`.
@@ -19,47 +19,75 @@ impl<'a> Decoder<'a> {
         Self { input }
     }
 
-    /// Decodes exactly one integer or byte string from the input.
+    /// Decodes exactly one complete Bencode value.
     ///
-    /// The returned byte string borrows its payload from the input buffer.
-    /// The first byte selects the value parser; unsupported markers are
-    /// reported separately from malformed integer or byte-string encodings.
+    /// Integers, byte strings, and lists are supported. Lists may contain any
+    /// supported value recursively. Byte-string payloads borrow from the input.
     ///
     /// # Errors
     ///
-    /// Returns [`DecodeError::EmptyInput`] for an empty buffer,
-    /// [`DecodeError::UnsupportedType`] for an unsupported value marker, or a
-    /// more specific error when the selected value is malformed, out of range,
-    /// incomplete, or followed by extra bytes.
-    pub fn decode(&self) -> ParseResult<'a> {
-        let Some(&prefix) = self.input.first() else {
+    /// Returns an error for empty input, unsupported value markers, malformed
+    /// values, incomplete input, or bytes remaining after the decoded value.
+    pub fn decode(&self) -> Result<Value<'a>, DecodeError> {
+        if self.input.is_empty() {
             return Err(DecodeError::EmptyInput);
+        }
+
+        // Parse from the root, then enforce the single-value contract here;
+        // nested parsers must leave following bytes available to their parent.
+        let (value, next_offset) = Self::parse_value_at(self.input, 0)?;
+        if next_offset < self.input.len() {
+            return Err(DecodeError::TrailingData {
+                remaining: self.input.len() - next_offset,
+            });
+        }
+
+        Ok(value)
+    }
+
+    /// Selects a parser from the value marker at `offset`.
+    ///
+    /// The returned offset is absolute in `input`, allowing a container parser
+    /// to continue at the next value without rescanning already parsed bytes.
+    fn parse_value_at(input: &'a [u8], offset: usize) -> ParseResult<'a> {
+        let Some(&marker) = input.get(offset) else {
+            return Err(DecodeError::UnexpectedEndOfInput {
+                expected: 1,
+                actual: 0,
+            });
         };
 
-        match prefix {
-            b'i' => Self::parse_integer(self.input),
-            b'0'..=b'9' => Self::parse_byte_string(self.input),
-            marker => Err(DecodeError::UnsupportedType { marker }),
+        match marker {
+            b'i' => Self::parse_integer_at(input, offset),
+            b'0'..=b'9' => Self::parse_byte_string_at(input, offset),
+            b'l' => Self::parse_list_at(input, offset),
+            _ => Err(DecodeError::UnsupportedType { marker }),
         }
     }
 
-    /// Parses one complete integer and rejects non-canonical representations.
+    /// Parses an integer beginning at `offset` and returns its next offset.
     ///
-    /// Bencode integers use decimal digits between `i` and `e`. Leading zeroes
-    /// and negative zero are rejected so a number has only one valid encoding;
-    /// values outside `i64` are rejected because [`Value::Integer`] stores an
-    /// `i64`.
-    fn parse_integer(input: &'a [u8]) -> ParseResult<'a> {
-        if !input.starts_with(b"i") || !input.ends_with(b"e") {
+    /// The terminator search is relative to the current value, while the
+    /// returned offset remains absolute in the original input. Leading zeroes
+    /// and negative zero are rejected to enforce canonical integer encoding;
+    /// values outside `i64` are rejected because [`Value::Integer`] uses `i64`.
+    fn parse_integer_at(input: &'a [u8], offset: usize) -> ParseResult<'a> {
+        let remaining = input.get(offset..).ok_or(DecodeError::InvalidInteger)?;
+        if remaining.first() != Some(&b'i') {
             return Err(DecodeError::InvalidInteger);
         }
 
-        let number = &input[1..input.len() - 1];
+        let Some(end_relative) = remaining.iter().position(|&byte| byte == b'e') else {
+            return Err(DecodeError::InvalidInteger);
+        };
+
+        // Search only after this integer's marker so a parent can pass a slice
+        // containing later sibling values without changing this value's end.
+        let number = &remaining[1..end_relative];
         let digits = number.strip_prefix(b"-").unwrap_or(number);
         if digits.is_empty() || !digits.iter().all(u8::is_ascii_digit) {
             return Err(DecodeError::InvalidInteger);
         }
-
         if digits[0] == b'0' && (digits.len() > 1 || number.starts_with(b"-")) {
             return Err(DecodeError::InvalidInteger);
         }
@@ -68,22 +96,26 @@ impl<'a> Decoder<'a> {
         let value = number
             .parse::<i64>()
             .map_err(|_| DecodeError::IntegerOutOfRange)?;
+        let next_offset = offset + end_relative + 1;
 
-        Ok(Value::Integer(value))
+        Ok((Value::Integer(value), next_offset))
     }
 
-    /// Parses one complete byte string using its decimal length prefix.
+    /// Parses a byte string beginning at `offset` and returns its next offset.
     ///
-    /// Only the bytes before the first colon form the length. The payload is
-    /// kept as arbitrary bytes, and its length must match the prefix exactly;
-    /// this prevents payload contents from being interpreted as syntax and
-    /// prevents trailing input from being silently accepted.
-    fn parse_byte_string(input: &'a [u8]) -> ParseResult<'a> {
-        let Some(separator) = input.iter().position(|&byte| byte == b':') else {
+    /// Only bytes before the first colon form the decimal length. The payload
+    /// is sliced from the current offset because it may contain arbitrary
+    /// bytes, including colons and Bencode markers. Bytes after the declared
+    /// payload belong to the enclosing value and are left for its parser.
+    fn parse_byte_string_at(input: &'a [u8], offset: usize) -> ParseResult<'a> {
+        let remaining = input
+            .get(offset..)
+            .ok_or(DecodeError::InvalidByteStringLength)?;
+        let Some(separator) = remaining.iter().position(|&byte| byte == b':') else {
             return Err(DecodeError::InvalidByteStringLength);
         };
 
-        let length_bytes = &input[..separator];
+        let length_bytes = &remaining[..separator];
         if length_bytes.is_empty()
             || !length_bytes.iter().all(u8::is_ascii_digit)
             || (length_bytes.len() > 1 && length_bytes[0] == b'0')
@@ -96,20 +128,51 @@ impl<'a> Decoder<'a> {
         let length = length_text
             .parse::<usize>()
             .map_err(|_| DecodeError::ByteStringLengthOutOfRange)?;
-        let payload = &input[separator + 1..];
-
+        // Treat the declared payload as opaque bytes: a payload may itself
+        // contain colons or Bencode markers, so scanning it would mis-parse it.
+        let payload = &remaining[separator + 1..];
         if payload.len() < length {
             return Err(DecodeError::UnexpectedEndOfInput {
                 expected: length,
                 actual: payload.len(),
             });
         }
-        if payload.len() > length {
-            return Err(DecodeError::TrailingData {
-                remaining: payload.len() - length,
-            });
+
+        let next_offset = offset + separator + 1 + length;
+        Ok((Value::ByteString(&payload[..length]), next_offset))
+    }
+
+    /// Parses a list beginning at `offset` and returns the offset after `e`.
+    ///
+    /// A list may contain any supported value. Each child parser advances the
+    /// cursor by returning its next absolute offset; the list terminator is
+    /// consumed by the list parser rather than treated as a value marker.
+    fn parse_list_at(input: &'a [u8], offset: usize) -> ParseResult<'a> {
+        if input.get(offset) != Some(&b'l') {
+            return Err(DecodeError::InvalidList);
         }
 
-        Ok(Value::ByteString(payload))
+        let mut values = Vec::new();
+        let mut cursor = offset + 1;
+        loop {
+            match input.get(cursor) {
+                // Only this list parser consumes its terminator; child parsers
+                // return before it so nested and adjacent lists remain distinct.
+                Some(b'e') => return Ok((Value::List(values), cursor + 1)),
+                None => {
+                    return Err(DecodeError::UnexpectedEndOfInput {
+                        expected: 1,
+                        actual: 0,
+                    });
+                }
+                Some(_) => {
+                    let (value, next_offset) = Self::parse_value_at(input, cursor)?;
+                    values.push(value);
+                    // Every successful child must advance the absolute cursor;
+                    // this keeps siblings parseable without copying input.
+                    cursor = next_offset;
+                }
+            }
+        }
     }
 }

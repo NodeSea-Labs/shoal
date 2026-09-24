@@ -1,6 +1,6 @@
 //! Bencode value types and parsing support.
 //!
-//! This module currently handles integer and byte-string values.
+//! The decoder supports integers, byte strings, and recursively nested lists.
 mod decoder;
 mod errors;
 mod value;

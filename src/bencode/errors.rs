@@ -1,5 +1,5 @@
 /// An error returned when a Bencode value cannot be decoded.
-#[derive(Debug, thiserror::Error)]
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
 pub enum DecodeError {
     /// The input buffer is empty.
     #[error("input is empty")]
@@ -25,11 +25,15 @@ pub enum DecodeError {
     #[error("Bencode byte-string length is outside the usize range")]
     ByteStringLengthOutOfRange,
 
-    /// The input contains fewer payload bytes than the byte-string length declares.
-    #[error("incomplete byte string: expected {expected} bytes, got {actual}")]
+    /// The input ends before the required encoded bytes are available.
+    #[error("unexpected end of input: expected {expected} bytes, got {actual}")]
     UnexpectedEndOfInput { expected: usize, actual: usize },
 
     /// Bytes remain after the decoded value.
     #[error("{remaining} trailing bytes after Bencode value")]
     TrailingData { remaining: usize },
+
+    /// A list marker was expected but not found.
+    #[error("invalid Bencode list")]
+    InvalidList,
 }
