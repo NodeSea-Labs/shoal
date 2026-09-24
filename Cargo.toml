@@ -1,0 +1,10 @@
+[package]
+name = "shoal"
+version = "0.0.1"
+edition = "2024"
+authors = [
+    "HualiNox"
+]
+
+[dependencies]
+thiserror = "2"
