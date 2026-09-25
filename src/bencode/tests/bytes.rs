@@ -1,4 +1,4 @@
-use crate::{Decoder, Value};
+use crate::{DecodeError, Decoder, Value};
 
 fn assert_bytes(input: &[u8], expected: &[u8]) {
     match Decoder::new(input).decode() {
@@ -13,6 +13,14 @@ fn assert_invalid(input: &[u8]) {
     assert!(
         Decoder::new(input).decode().is_err(),
         "expected error for invalid input: {input:?}"
+    );
+}
+
+fn assert_error(input: &[u8], expected: DecodeError) {
+    assert_eq!(
+        Decoder::new(input).decode(),
+        Err(expected),
+        "unexpected error for input: {input:?}"
     );
 }
 
@@ -74,13 +82,38 @@ fn bytes_all_byte_values() {
 
 #[test]
 fn bytes_invalid_length_format() {
-    let cases: &[&[u8]] = &[
-        b":", b":hello", b"-1:a", b"+1:a", b" 1:a", b"1 :a", b"1.0:a", b"1e:a", b"i1e:a", b"a:a",
-        b"\x001:a", b"\xff1:a",
+    let cases: &[(&[u8], DecodeError)] = &[
+        (b"1 :a", DecodeError::InvalidByteStringLength),
+        (b"1.0:a", DecodeError::InvalidByteStringLength),
+        (b"1e:a", DecodeError::InvalidByteStringLength),
+        (b"0", DecodeError::InvalidByteStringLength),
+        (b"12", DecodeError::InvalidByteStringLength),
     ];
 
-    for &input in cases {
-        assert_invalid(input);
+    for &(input, ref expected) in cases {
+        assert_eq!(
+            Decoder::new(input).decode().as_ref(),
+            Err(expected),
+            "unexpected error for input: {input:?}"
+        );
+    }
+}
+
+#[test]
+fn bytes_rejects_unsupported_root_markers() {
+    let cases: &[(&[u8], u8)] = &[
+        (b":", b':'),
+        (b":hello", b':'),
+        (b"-1:a", b'-'),
+        (b"+1:a", b'+'),
+        (b" 1:a", b' '),
+        (b"a:a", b'a'),
+        (b"\x001:a", 0),
+        (b"\xff1:a", 0xff),
+    ];
+
+    for &(input, marker) in cases {
+        assert_error(input, DecodeError::UnsupportedType { marker });
     }
 }
 
@@ -98,61 +131,54 @@ fn bytes_leading_zeros() {
     ];
 
     for &input in cases {
-        assert_invalid(input);
+        assert_error(input, DecodeError::InvalidByteStringLength);
     }
 }
 
 #[test]
 fn bytes_length_too_short() {
-    let cases: &[&[u8]] = &[
-        b"1:",
-        b"2:a",
-        b"3:ab",
-        b"5:hell",
-        b"10:hello",
-        b"1",
-        b"12",
-        b"123",
+    let cases: &[(&[u8], usize, usize)] = &[
+        (b"1:", 1, 0),
+        (b"2:a", 2, 1),
+        (b"3:ab", 3, 2),
+        (b"5:hell", 5, 4),
+        (b"10:hello", 10, 5),
     ];
 
-    for &input in cases {
-        assert_invalid(input);
+    for &(input, expected, actual) in cases {
+        assert_error(
+            input,
+            DecodeError::UnexpectedEndOfInput { expected, actual },
+        );
     }
 }
 
 #[test]
-fn bytes_length_too_long() {
-    let cases: &[&[u8]] = &[b"0:a", b"1:ab", b"2:abc", b"3:abcd", b"5:hello!", b"0::"];
-
-    for &input in cases {
-        assert_invalid(input);
-    }
+fn bytes_empty_input_reports_empty_input() {
+    assert_error(b"", DecodeError::EmptyInput);
 }
 
 #[test]
-fn bytes_missing_components() {
-    let cases: &[&[u8]] = &[b"", b"0", b"1", b"123", b"hello", b"abc:", b"::"];
-
-    for &input in cases {
-        assert_invalid(input);
-    }
-}
-
-#[test]
-fn bytes_extra_data() {
-    let cases: &[&[u8]] = &[
-        b"0:0:",
-        b"1:ai1e",
-        b"1:ae",
-        b"1:a ",
-        b"1:a\x00",
-        b"1:ab",
-        b"1:aehello",
-        b"5:helloi42e",
+fn bytes_rejects_trailing_data_after_payload() {
+    let cases: &[(&[u8], usize)] = &[
+        (b"0:a", 1),
+        (b"0:0:", 2),
+        (b"1:ai1e", 3),
+        (b"1:ae", 1),
+        (b"1:a ", 1),
+        (b"1:a\x00", 1),
+        (b"1:ab", 1),
+        (b"2:abc", 1),
+        (b"3:abcd", 1),
+        (b"5:hello!", 1),
+        (b"0::", 1),
+        (b"1:aehello", 6),
+        (b"5:helloi42e", 4),
+        (b"i1e:a", 2),
     ];
 
-    for &input in cases {
-        assert_invalid(input);
+    for &(input, remaining) in cases {
+        assert_error(input, DecodeError::TrailingData { remaining });
     }
 }
 
@@ -164,7 +190,7 @@ fn bytes_length_overflow() {
     ];
 
     for &input in cases {
-        assert_invalid(input);
+        assert_error(input, DecodeError::ByteStringLengthOutOfRange);
     }
 }
 
@@ -182,16 +208,16 @@ fn bytes_truncated_input() {
 
 #[test]
 fn bytes_large_payload() {
-    let data = vec![b'a'; 4096];
+    let data = vec![b'a'; 1_000_000];
 
-    let mut encoded = b"4096:".to_vec();
+    let mut encoded = b"1000000:".to_vec();
     encoded.extend_from_slice(&data);
 
     assert_bytes(&encoded, &data);
 }
 
 #[test]
-fn bytes_roundtrip_lengths() {
+fn bytes_parses_formatted_length_prefixes() {
     let lengths = [0, 1, 2, 9, 10, 99, 100, 255, 256, 1024, 4096];
 
     for len in lengths {

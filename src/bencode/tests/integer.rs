@@ -16,6 +16,14 @@ fn assert_invalid(input: &[u8]) {
     );
 }
 
+fn assert_error(input: &[u8], expected: crate::DecodeError) {
+    assert_eq!(
+        Decoder::new(input).decode(),
+        Err(expected),
+        "unexpected error for input: {input:?}"
+    );
+}
+
 #[test]
 fn integer_valid_values() {
     let cases: &[(&[u8], i64)] = &[
@@ -72,7 +80,7 @@ fn integer_overflow() {
     ];
 
     for &input in cases {
-        assert_invalid(input);
+        assert_error(input, crate::DecodeError::IntegerOutOfRange);
     }
 }
 
@@ -91,13 +99,13 @@ fn integer_leading_zeros() {
     ];
 
     for &input in cases {
-        assert_invalid(input);
+        assert_error(input, crate::DecodeError::InvalidInteger);
     }
 }
 
 #[test]
 fn integer_negative_zero() {
-    assert_invalid(b"i-0e");
+    assert_error(b"i-0e", crate::DecodeError::InvalidInteger);
 }
 
 #[test]
@@ -108,78 +116,75 @@ fn integer_invalid_sign() {
     ];
 
     for &input in cases {
-        assert_invalid(input);
+        assert_error(input, crate::DecodeError::InvalidInteger);
     }
 }
 
 #[test]
-fn integer_missing_components() {
-    let cases: &[&[u8]] = &[
-        b"", b"i", b"e", b"ie", b"i-", b"i123", b"i-123", b"123e", b"-123e", b"123", b"i123E",
-    ];
-
-    for &input in cases {
-        assert_invalid(input);
+fn integer_reports_errors_for_incomplete_and_non_integer_roots() {
+    assert_error(b"", crate::DecodeError::EmptyInput);
+    for &input in &[b"i".as_slice(), b"ie", b"i-", b"i123", b"i-123", b"i123E"] {
+        assert_error(input, crate::DecodeError::InvalidInteger);
     }
+    assert_error(b"e", crate::DecodeError::UnsupportedType { marker: b'e' });
+    assert_error(b"123e", crate::DecodeError::InvalidByteStringLength);
+    assert_error(
+        b"-123e",
+        crate::DecodeError::UnsupportedType { marker: b'-' },
+    );
+    assert_error(b"123", crate::DecodeError::InvalidByteStringLength);
 }
 
 #[test]
 fn integer_invalid_characters() {
     let cases: &[&[u8]] = &[
-        // Letters
         b"ia e",
         b"i12ae",
         b"i1Ee",
-        // Decimal point
         b"i1.0e",
         b"i-1.5e",
-        // Whitespace
         b"i 1e",
         b"i1 e",
         b"i1 2e",
         b"i\t1e",
         b"i1\ne",
         b"i1\re",
-        // NUL and control bytes
         b"i\0e",
         b"i1\0e",
         b"i\x01e",
-        // Non-ASCII bytes
         b"i\x80e",
         b"i\xffe",
         b"i\xc2\xb9e",
     ];
 
     for &input in cases {
-        assert_invalid(input);
+        assert_error(input, crate::DecodeError::InvalidInteger);
     }
 }
 
 #[test]
-fn integer_extra_bytes() {
-    let cases: &[&[u8]] = &[
-        b"i1ee",
-        b"i1eee",
-        b"i1e0",
-        b"i1e ",
-        b"i1e\0",
-        b"\0i1e",
-        b"xi1e",
-        b"i1ei2e",
-        b"i1ehello",
+fn integer_trailing_data() {
+    let cases: &[(&[u8], usize)] = &[
+        (b"i1ee", 1),
+        (b"i1eee", 2),
+        (b"i1e0", 1),
+        (b"i1e ", 1),
+        (b"i1e\0", 1),
+        (b"i1ei2e", 3),
+        (b"i1ehello", 5),
     ];
 
-    for &input in cases {
-        assert_invalid(input);
+    for &(input, remaining) in cases {
+        assert_error(input, crate::DecodeError::TrailingData { remaining });
     }
 }
 
 #[test]
-fn integer_reports_trailing_bytes_after_terminator() {
-    assert_eq!(
-        Decoder::new(b"i1ee").decode(),
-        Err(crate::DecodeError::TrailingData { remaining: 1 })
-    );
+fn integer_rejects_unsupported_root_markers() {
+    for marker in [0, b'x'] {
+        let input = [marker, b'i', b'1', b'e'];
+        assert_error(&input, crate::DecodeError::UnsupportedType { marker });
+    }
 }
 
 #[test]
@@ -203,7 +208,7 @@ fn integer_all_single_byte_payloads() {
         if byte.is_ascii_digit() {
             assert_integer(&input, (byte - b'0') as i64);
         } else {
-            assert_invalid(&input);
+            assert_error(&input, crate::DecodeError::InvalidInteger);
         }
     }
 }
@@ -213,11 +218,11 @@ fn integer_very_long_number() {
     // A long numeric payload must not overflow or panic.
     let input = format!("i{}e", "9".repeat(4096));
 
-    assert_invalid(input.as_bytes());
+    assert_error(input.as_bytes(), crate::DecodeError::IntegerOutOfRange);
 }
 
 #[test]
-fn integer_roundtrip_from_i64() {
+fn integer_parses_formatted_i64_values() {
     let cases = [
         i64::MIN,
         i64::MIN + 1,

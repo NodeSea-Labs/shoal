@@ -109,5 +109,14 @@ fn list_accepts_nesting_at_the_limit() {
     input.extend_from_slice(b"i0e");
     input.extend(std::iter::repeat_n(b'e', MAX_DEPTH));
 
-    assert!(Decoder::new(&input).decode().is_ok());
+    let decoded = Decoder::new(&input).decode().unwrap();
+    let mut current = &decoded;
+    for _ in 0..MAX_DEPTH {
+        let Value::List(values) = current else {
+            panic!("expected a list at each nesting level");
+        };
+        assert_eq!(values.len(), 1);
+        current = &values[0];
+    }
+    assert_eq!(current, &Value::Integer(0));
 }
