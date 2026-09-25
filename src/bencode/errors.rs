@@ -41,6 +41,10 @@ pub enum DecodeError {
     #[error("invalid Bencode dictionary")]
     InvalidDictionary,
 
+    /// A dictionary key does not use the byte-string encoding.
+    #[error("Bencode dictionary key is not a byte string")]
+    InvalidDictionaryKey,
+
     /// A dictionary key is not followed by a value.
     #[error("Bencode dictionary key is missing its value")]
     MissingDictionaryValue,
@@ -48,4 +52,8 @@ pub enum DecodeError {
     /// The input exceeds the maximum supported nesting depth.
     #[error("Bencode nesting depth exceeds the limit of {limit}")]
     NestingTooDeep { limit: usize },
+
+    /// The input contains more parsed values and dictionary keys than allowed.
+    #[error("Bencode token count exceeds the limit of {limit}")]
+    TokenLimitExceeded { limit: usize },
 }

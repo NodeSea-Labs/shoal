@@ -1,4 +1,4 @@
-use crate::{DecodeError, Decoder, Value};
+use crate::{DecodeError, DecodeLimits, Decoder, Value};
 use bytes::Bytes;
 
 fn byte_string(value: &[u8]) -> Bytes {
@@ -76,7 +76,21 @@ fn dictionary_decodes_many_entries() {
 fn dictionary_rejects_non_byte_string_key() {
     assert_eq!(
         Decoder::new(b"di5e1:ae").decode(),
-        Err(DecodeError::InvalidByteStringLength)
+        Err(DecodeError::InvalidDictionaryKey)
+    );
+}
+
+#[test]
+fn dictionary_token_budget_counts_keys_and_values() {
+    let limits = DecodeLimits {
+        max_tokens: 3,
+        ..DecodeLimits::default()
+    };
+    assert!(Decoder::with_limits(b"d1:ai1ee", limits).decode().is_ok());
+
+    assert_eq!(
+        Decoder::with_limits(b"d1:ai1e1:bi2ee", limits).decode(),
+        Err(DecodeError::TokenLimitExceeded { limit: 3 })
     );
 }
 

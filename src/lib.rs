@@ -5,4 +5,4 @@
 //! represented by [`DecodeError`].
 mod bencode;
 
-pub use bencode::{DecodeError, Decoder, Value};
+pub use bencode::{DecodeError, DecodeLimits, Decoder, Value};

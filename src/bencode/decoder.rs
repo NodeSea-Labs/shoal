@@ -2,6 +2,26 @@ use crate::{DecodeError, bencode::Value};
 
 /// Maximum number of nested lists and dictionaries accepted by the decoder.
 const MAX_NESTING_DEPTH: usize = 100;
+/// Maximum number of values and dictionary keys decoded by default.
+const MAX_TOKENS: usize = 2_000_000;
+
+/// Resource limits applied while decoding a Bencode value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DecodeLimits {
+    /// Maximum number of nested lists and dictionaries.
+    pub max_nesting_depth: usize,
+    /// Maximum number of values and dictionary keys.
+    pub max_tokens: usize,
+}
+
+impl Default for DecodeLimits {
+    fn default() -> Self {
+        Self {
+            max_nesting_depth: MAX_NESTING_DEPTH,
+            max_tokens: MAX_TOKENS,
+        }
+    }
+}
 
 /// Decodes supported Bencode values from an input buffer.
 ///
@@ -13,6 +33,7 @@ const MAX_NESTING_DEPTH: usize = 100;
 pub struct Decoder<'a> {
     /// The complete encoded input being decoded.
     input: &'a [u8],
+    limits: DecodeLimits,
 }
 
 /// A decoded value and the absolute offset of the next unread input byte.
@@ -21,7 +42,12 @@ type ParseResult = Result<(Value, usize), DecodeError>;
 impl<'a> Decoder<'a> {
     /// Creates a decoder that borrows `input` for the lifetime `'a`.
     pub fn new(input: &'a [u8]) -> Self {
-        Self { input }
+        Self::with_limits(input, DecodeLimits::default())
+    }
+
+    /// Creates a decoder with caller-defined resource limits.
+    pub fn with_limits(input: &'a [u8], limits: DecodeLimits) -> Self {
+        Self { input, limits }
     }
 
     /// Decodes exactly one complete Bencode value.
@@ -35,7 +61,7 @@ impl<'a> Decoder<'a> {
     /// # Errors
     ///
     /// Returns an error for empty input, unsupported value markers, malformed
-    /// values, incomplete input, nesting deeper than 100 containers, or bytes
+    /// values, incomplete input, configured nesting or token limits, or bytes
     /// remaining after the decoded value.
     pub fn decode(&self) -> Result<Value, DecodeError> {
         if self.input.is_empty() {
@@ -44,7 +70,9 @@ impl<'a> Decoder<'a> {
 
         // Parse from the root, then enforce the single-value contract here;
         // nested parsers must leave following bytes available to their parent.
-        let (value, next_offset) = Self::parse_value_at(self.input, 0, 0)?;
+        let mut token_count = 0;
+        let (value, next_offset) =
+            Self::parse_value_at(self.input, 0, 0, &mut token_count, self.limits)?;
         if next_offset < self.input.len() {
             return Err(DecodeError::TrailingData {
                 remaining: self.input.len() - next_offset,
@@ -58,7 +86,14 @@ impl<'a> Decoder<'a> {
     ///
     /// The returned offset is absolute in `input`, allowing a container parser
     /// to continue at the next value without rescanning already parsed bytes.
-    fn parse_value_at(input: &'a [u8], offset: usize, nesting_depth: usize) -> ParseResult {
+    fn parse_value_at(
+        input: &'a [u8],
+        offset: usize,
+        nesting_depth: usize,
+        token_count: &mut usize,
+        limits: DecodeLimits,
+    ) -> ParseResult {
+        Self::consume_token(token_count, limits.max_tokens)?;
         let Some(&marker) = input.get(offset) else {
             return Err(DecodeError::UnexpectedEndOfInput {
                 expected: 1,
@@ -71,11 +106,15 @@ impl<'a> Decoder<'a> {
         match marker {
             b'i' => Self::parse_integer_at(input, offset),
             b'0'..=b'9' => Self::parse_byte_string_at(input, offset),
-            b'l' | b'd' if nesting_depth >= MAX_NESTING_DEPTH => Err(DecodeError::NestingTooDeep {
-                limit: MAX_NESTING_DEPTH,
-            }),
-            b'l' => Self::parse_list_at(input, offset, nesting_depth + 1),
-            b'd' => Self::parse_dictionary_at(input, offset, nesting_depth + 1),
+            b'l' | b'd' if nesting_depth >= limits.max_nesting_depth => {
+                Err(DecodeError::NestingTooDeep {
+                    limit: limits.max_nesting_depth,
+                })
+            }
+            b'l' => Self::parse_list_at(input, offset, nesting_depth + 1, token_count, limits),
+            b'd' => {
+                Self::parse_dictionary_at(input, offset, nesting_depth + 1, token_count, limits)
+            }
             _ => Err(DecodeError::UnsupportedType { marker }),
         }
     }
@@ -165,7 +204,13 @@ impl<'a> Decoder<'a> {
     /// A list may contain any supported value. Each child parser advances the
     /// cursor by returning its next absolute offset; the list terminator is
     /// consumed by the list parser rather than treated as a value marker.
-    fn parse_list_at(input: &'a [u8], offset: usize, nesting_depth: usize) -> ParseResult {
+    fn parse_list_at(
+        input: &'a [u8],
+        offset: usize,
+        nesting_depth: usize,
+        token_count: &mut usize,
+        limits: DecodeLimits,
+    ) -> ParseResult {
         if input.get(offset) != Some(&b'l') {
             return Err(DecodeError::InvalidList);
         }
@@ -184,7 +229,8 @@ impl<'a> Decoder<'a> {
                     });
                 }
                 Some(_) => {
-                    let (value, next_offset) = Self::parse_value_at(input, cursor, nesting_depth)?;
+                    let (value, next_offset) =
+                        Self::parse_value_at(input, cursor, nesting_depth, token_count, limits)?;
                     values.push(value);
                     // Every successful child must advance the absolute cursor;
                     // this keeps siblings parseable without copying input.
@@ -198,7 +244,13 @@ impl<'a> Decoder<'a> {
     /// terminator.
     ///
     /// The returned offset points immediately after the dictionary's `e`.
-    fn parse_dictionary_at(input: &'a [u8], offset: usize, nesting_depth: usize) -> ParseResult {
+    fn parse_dictionary_at(
+        input: &'a [u8],
+        offset: usize,
+        nesting_depth: usize,
+        token_count: &mut usize,
+        limits: DecodeLimits,
+    ) -> ParseResult {
         if input.get(offset) != Some(&b'd') {
             return Err(DecodeError::InvalidDictionary);
         }
@@ -215,14 +267,23 @@ impl<'a> Decoder<'a> {
                 }
                 Some(b'e') => return Ok((Value::Dictionary(entries), cursor + 1)),
                 Some(_) => {
+                    if !input[cursor].is_ascii_digit() {
+                        return Err(DecodeError::InvalidDictionaryKey);
+                    }
+                    Self::consume_token(token_count, limits.max_tokens)?;
                     let (key, value_offset) = Self::parse_byte_string_at(input, cursor)?;
                     // A dictionary terminator can close the container, but it
                     // cannot stand in for the value paired with this key.
                     if input.get(value_offset) == Some(&b'e') {
                         return Err(DecodeError::MissingDictionaryValue);
                     }
-                    let (value, next_entry_offset) =
-                        Self::parse_value_at(input, value_offset, nesting_depth)?;
+                    let (value, next_entry_offset) = Self::parse_value_at(
+                        input,
+                        value_offset,
+                        nesting_depth,
+                        token_count,
+                        limits,
+                    )?;
                     let Value::Bytes(key_bytes) = key else {
                         return Err(DecodeError::InvalidDictionary);
                     };
@@ -231,5 +292,14 @@ impl<'a> Decoder<'a> {
                 }
             }
         }
+    }
+
+    /// Counts one parsed value or dictionary key and enforces the token budget.
+    fn consume_token(token_count: &mut usize, limit: usize) -> Result<(), DecodeError> {
+        if *token_count >= limit {
+            return Err(DecodeError::TokenLimitExceeded { limit });
+        }
+        *token_count += 1;
+        Ok(())
     }
 }

@@ -6,7 +6,7 @@ mod decoder;
 mod errors;
 mod value;
 
-pub use decoder::Decoder;
+pub use decoder::{DecodeLimits, Decoder};
 pub use errors::DecodeError;
 pub use value::Value;
 
