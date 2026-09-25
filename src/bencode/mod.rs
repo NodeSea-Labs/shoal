@@ -6,7 +6,10 @@ mod decoder;
 mod errors;
 mod value;
 
-pub use decoder::{DecodeLimits, Decoder};
+pub use decoder::{
+    DecodeOptions, DecodeOptionsBuilder, DecodeOutput, DecodeWarning, Decoder, DictionaryKeyPolicy,
+    decode, decode_with_options, decode_with_warnings,
+};
 pub use errors::DecodeError;
 pub use value::Value;
 

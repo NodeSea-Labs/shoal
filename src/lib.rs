@@ -5,4 +5,7 @@
 //! represented by [`DecodeError`].
 mod bencode;
 
-pub use bencode::{DecodeError, DecodeLimits, Decoder, Value};
+pub use bencode::{
+    DecodeError, DecodeOptions, DecodeOptionsBuilder, DecodeOutput, DecodeWarning, Decoder,
+    DictionaryKeyPolicy, Value, decode, decode_with_options, decode_with_warnings,
+};

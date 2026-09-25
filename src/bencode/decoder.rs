@@ -1,25 +1,143 @@
 use crate::{DecodeError, bencode::Value};
+use std::collections::HashSet;
 
 /// Maximum number of nested lists and dictionaries accepted by the decoder.
 const MAX_NESTING_DEPTH: usize = 100;
 /// Maximum number of values and dictionary keys decoded by default.
 const MAX_TOKENS: usize = 2_000_000;
 
-/// Resource limits applied while decoding a Bencode value.
+/// Resource and validation options applied while decoding a Bencode value.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct DecodeLimits {
-    /// Maximum number of nested lists and dictionaries.
-    pub max_nesting_depth: usize,
-    /// Maximum number of values and dictionary keys.
-    pub max_tokens: usize,
+pub struct DecodeOptions {
+    max_nesting_depth: usize,
+    max_tokens: usize,
+    dictionary_key_policy: DictionaryKeyPolicy,
 }
 
-impl Default for DecodeLimits {
+impl Default for DecodeOptions {
     fn default() -> Self {
         Self {
             max_nesting_depth: MAX_NESTING_DEPTH,
             max_tokens: MAX_TOKENS,
+            dictionary_key_policy: DictionaryKeyPolicy::RejectNonCanonical,
         }
+    }
+}
+
+impl DecodeOptions {
+    /// Starts building options from their defaults.
+    pub fn builder() -> DecodeOptionsBuilder {
+        DecodeOptionsBuilder::default()
+    }
+
+    /// Returns the maximum number of nested lists and dictionaries.
+    pub fn max_nesting_depth(self) -> usize {
+        self.max_nesting_depth
+    }
+
+    /// Returns the maximum number of decoded values and dictionary keys.
+    pub fn max_tokens(self) -> usize {
+        self.max_tokens
+    }
+
+    /// Returns the policy used for unordered or duplicate dictionary keys.
+    pub fn dictionary_key_policy(self) -> DictionaryKeyPolicy {
+        self.dictionary_key_policy
+    }
+}
+
+/// Controls handling of dictionary keys that are unordered or duplicated.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DictionaryKeyPolicy {
+    /// Reject keys that are not strictly increasing in raw byte order.
+    #[default]
+    RejectNonCanonical,
+    /// Preserve keys as they appear, including unordered and duplicate keys.
+    /// Use [`Decoder::decode_with_warnings`] to inspect non-fatal diagnostics.
+    PreserveInput,
+}
+
+/// A decoded value together with any non-fatal canonicality warnings.
+#[derive(Debug, PartialEq, Eq)]
+pub struct DecodeOutput {
+    /// The parsed Bencode value.
+    pub value: Value,
+    /// Non-fatal issues found while decoding in a permissive mode.
+    pub warnings: Vec<DecodeWarning>,
+}
+
+impl DecodeOutput {
+    /// Returns the parsed Bencode value.
+    pub fn value(&self) -> &Value {
+        &self.value
+    }
+
+    /// Returns the non-fatal warnings produced while decoding.
+    pub fn warnings(&self) -> &[DecodeWarning] {
+        &self.warnings
+    }
+
+    /// Returns whether decoding produced any non-fatal warnings.
+    pub fn has_warnings(&self) -> bool {
+        !self.warnings.is_empty()
+    }
+
+    /// Returns the decoded value and warnings, consuming this output.
+    pub fn into_parts(self) -> (Value, Vec<DecodeWarning>) {
+        (self.value, self.warnings)
+    }
+
+    /// Returns the decoded value, discarding any warnings.
+    pub fn into_value(self) -> Value {
+        self.value
+    }
+}
+
+/// A non-fatal issue reported by permissive decoding.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DecodeWarning {
+    /// A dictionary key sorts before the preceding key by raw byte order.
+    UnsortedDictionaryKey {
+        /// The key that appeared out of order.
+        key: bytes::Bytes,
+        /// The key immediately preceding it in the encoded input.
+        previous_key: bytes::Bytes,
+    },
+    /// A dictionary key duplicates an earlier key in the same dictionary.
+    DuplicateDictionaryKey {
+        /// The repeated key.
+        key: bytes::Bytes,
+    },
+}
+
+/// Builder for decoder resource and validation options.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct DecodeOptionsBuilder {
+    options: DecodeOptions,
+}
+
+impl DecodeOptionsBuilder {
+    /// Sets the maximum number of nested lists and dictionaries.
+    pub fn max_nesting_depth(mut self, max_nesting_depth: usize) -> Self {
+        self.options.max_nesting_depth = max_nesting_depth;
+        self
+    }
+
+    /// Sets the maximum number of values and dictionary keys.
+    pub fn max_tokens(mut self, max_tokens: usize) -> Self {
+        self.options.max_tokens = max_tokens;
+        self
+    }
+
+    /// Sets how unordered or duplicate dictionary keys are handled.
+    pub fn dictionary_key_policy(mut self, policy: DictionaryKeyPolicy) -> Self {
+        self.options.dictionary_key_policy = policy;
+        self
+    }
+
+    /// Builds the decoder options.
+    pub fn build(self) -> DecodeOptions {
+        self.options
     }
 }
 
@@ -33,7 +151,31 @@ impl Default for DecodeLimits {
 pub struct Decoder<'a> {
     /// The complete encoded input being decoded.
     input: &'a [u8],
-    limits: DecodeLimits,
+    options: DecodeOptions,
+}
+
+/// Decodes exactly one Bencode value using the default options.
+///
+/// Use [`decode_with_options`] to customize resource limits or dictionary-key
+/// handling, or [`decode_with_warnings`] to retain non-fatal diagnostics.
+pub fn decode(input: &[u8]) -> Result<Value, DecodeError> {
+    Decoder::new(input).decode()
+}
+
+/// Decodes exactly one Bencode value using caller-provided options.
+///
+/// This returns only the value and discards non-fatal warnings. Use
+/// [`decode_with_warnings`] when warnings must be inspected.
+pub fn decode_with_options(input: &[u8], options: DecodeOptions) -> Result<Value, DecodeError> {
+    Decoder::with_options(input, options).decode()
+}
+
+/// Decodes one Bencode value and returns any non-fatal canonicality warnings.
+pub fn decode_with_warnings(
+    input: &[u8],
+    options: DecodeOptions,
+) -> Result<DecodeOutput, DecodeError> {
+    Decoder::with_options(input, options).decode_with_warnings()
 }
 
 /// A decoded value and the absolute offset of the next unread input byte.
@@ -42,12 +184,12 @@ type ParseResult = Result<(Value, usize), DecodeError>;
 impl<'a> Decoder<'a> {
     /// Creates a decoder that borrows `input` for the lifetime `'a`.
     pub fn new(input: &'a [u8]) -> Self {
-        Self::with_limits(input, DecodeLimits::default())
+        Self::with_options(input, DecodeOptions::default())
     }
 
-    /// Creates a decoder with caller-defined resource limits.
-    pub fn with_limits(input: &'a [u8], limits: DecodeLimits) -> Self {
-        Self { input, limits }
+    /// Creates a decoder with caller-defined parsing and validation options.
+    pub fn with_options(input: &'a [u8], options: DecodeOptions) -> Self {
+        Self { input, options }
     }
 
     /// Decodes exactly one complete Bencode value.
@@ -58,12 +200,27 @@ impl<'a> Decoder<'a> {
     /// into owned [`bytes::Bytes`] values, so the decoded value does not borrow
     /// from the input.
     ///
+    /// This convenience method discards non-fatal warnings. Use
+    /// [`Self::decode_with_warnings`] when permissive parsing is configured and
+    /// callers need to inspect canonicality issues.
+    ///
     /// # Errors
     ///
     /// Returns an error for empty input, unsupported value markers, malformed
-    /// values, incomplete input, configured nesting or token limits, or bytes
-    /// remaining after the decoded value.
+    /// values, incomplete input, configured nesting or token limits, non-canonical
+    /// dictionary keys under the default policy, or bytes remaining after the
+    /// decoded value.
     pub fn decode(&self) -> Result<Value, DecodeError> {
+        self.decode_with_warnings().map(|output| output.value)
+    }
+
+    /// Decodes one value and returns non-fatal canonicality warnings.
+    ///
+    /// With [`DictionaryKeyPolicy::PreserveInput`], unordered and duplicate
+    /// dictionary keys are retained in the decoded value and reported in
+    /// `warnings`. Under the default strict policy, these conditions remain
+    /// fatal errors instead. This method does not log or print diagnostics.
+    pub fn decode_with_warnings(&self) -> Result<DecodeOutput, DecodeError> {
         if self.input.is_empty() {
             return Err(DecodeError::EmptyInput);
         }
@@ -71,15 +228,22 @@ impl<'a> Decoder<'a> {
         // Parse from the root, then enforce the single-value contract here;
         // nested parsers must leave following bytes available to their parent.
         let mut token_count = 0;
-        let (value, next_offset) =
-            Self::parse_value_at(self.input, 0, 0, &mut token_count, self.limits)?;
+        let mut warnings = Vec::new();
+        let (value, next_offset) = Self::parse_value_at(
+            self.input,
+            0,
+            0,
+            &mut token_count,
+            &mut warnings,
+            self.options,
+        )?;
         if next_offset < self.input.len() {
             return Err(DecodeError::TrailingData {
                 remaining: self.input.len() - next_offset,
             });
         }
 
-        Ok(value)
+        Ok(DecodeOutput { value, warnings })
     }
 
     /// Selects a parser from the value marker at `offset`.
@@ -91,9 +255,10 @@ impl<'a> Decoder<'a> {
         offset: usize,
         nesting_depth: usize,
         token_count: &mut usize,
-        limits: DecodeLimits,
+        warnings: &mut Vec<DecodeWarning>,
+        options: DecodeOptions,
     ) -> ParseResult {
-        Self::consume_token(token_count, limits.max_tokens)?;
+        Self::consume_token(token_count, options.max_tokens)?;
         let Some(&marker) = input.get(offset) else {
             return Err(DecodeError::UnexpectedEndOfInput {
                 expected: 1,
@@ -106,15 +271,27 @@ impl<'a> Decoder<'a> {
         match marker {
             b'i' => Self::parse_integer_at(input, offset),
             b'0'..=b'9' => Self::parse_byte_string_at(input, offset),
-            b'l' | b'd' if nesting_depth >= limits.max_nesting_depth => {
+            b'l' | b'd' if nesting_depth >= options.max_nesting_depth => {
                 Err(DecodeError::NestingTooDeep {
-                    limit: limits.max_nesting_depth,
+                    limit: options.max_nesting_depth,
                 })
             }
-            b'l' => Self::parse_list_at(input, offset, nesting_depth + 1, token_count, limits),
-            b'd' => {
-                Self::parse_dictionary_at(input, offset, nesting_depth + 1, token_count, limits)
-            }
+            b'l' => Self::parse_list_at(
+                input,
+                offset,
+                nesting_depth + 1,
+                token_count,
+                warnings,
+                options,
+            ),
+            b'd' => Self::parse_dictionary_at(
+                input,
+                offset,
+                nesting_depth + 1,
+                token_count,
+                warnings,
+                options,
+            ),
             _ => Err(DecodeError::UnsupportedType { marker }),
         }
     }
@@ -209,7 +386,8 @@ impl<'a> Decoder<'a> {
         offset: usize,
         nesting_depth: usize,
         token_count: &mut usize,
-        limits: DecodeLimits,
+        warnings: &mut Vec<DecodeWarning>,
+        options: DecodeOptions,
     ) -> ParseResult {
         if input.get(offset) != Some(&b'l') {
             return Err(DecodeError::InvalidList);
@@ -229,8 +407,14 @@ impl<'a> Decoder<'a> {
                     });
                 }
                 Some(_) => {
-                    let (value, next_offset) =
-                        Self::parse_value_at(input, cursor, nesting_depth, token_count, limits)?;
+                    let (value, next_offset) = Self::parse_value_at(
+                        input,
+                        cursor,
+                        nesting_depth,
+                        token_count,
+                        warnings,
+                        options,
+                    )?;
                     values.push(value);
                     // Every successful child must advance the absolute cursor;
                     // this keeps siblings parseable without copying input.
@@ -241,7 +425,8 @@ impl<'a> Decoder<'a> {
     }
 
     /// Parses alternating byte-string keys and values until the dictionary
-    /// terminator.
+    /// terminator. Depending on the configured policy, keys must be strictly
+    /// increasing in raw byte order or are preserved and reported as warnings.
     ///
     /// The returned offset points immediately after the dictionary's `e`.
     fn parse_dictionary_at(
@@ -249,13 +434,18 @@ impl<'a> Decoder<'a> {
         offset: usize,
         nesting_depth: usize,
         token_count: &mut usize,
-        limits: DecodeLimits,
+        warnings: &mut Vec<DecodeWarning>,
+        options: DecodeOptions,
     ) -> ParseResult {
         if input.get(offset) != Some(&b'd') {
             return Err(DecodeError::InvalidDictionary);
         }
 
         let mut entries = Vec::new();
+        // Strict mode only needs the preceding key. Permissive mode must also
+        // detect duplicates separated by other (possibly unordered) entries.
+        let mut seen_keys = (options.dictionary_key_policy == DictionaryKeyPolicy::PreserveInput)
+            .then(HashSet::<bytes::Bytes>::new);
         let mut cursor = offset + 1;
         loop {
             match input.get(cursor) {
@@ -270,7 +460,7 @@ impl<'a> Decoder<'a> {
                     if !input[cursor].is_ascii_digit() {
                         return Err(DecodeError::InvalidDictionaryKey);
                     }
-                    Self::consume_token(token_count, limits.max_tokens)?;
+                    Self::consume_token(token_count, options.max_tokens)?;
                     let (key, value_offset) = Self::parse_byte_string_at(input, cursor)?;
                     // A dictionary terminator can close the container, but it
                     // cannot stand in for the value paired with this key.
@@ -282,11 +472,42 @@ impl<'a> Decoder<'a> {
                         value_offset,
                         nesting_depth,
                         token_count,
-                        limits,
+                        warnings,
+                        options,
                     )?;
                     let Value::Bytes(key_bytes) = key else {
                         return Err(DecodeError::InvalidDictionary);
                     };
+                    if let Some((previous_key, _)) = entries.last() {
+                        match key_bytes.as_ref().cmp(previous_key.as_ref()) {
+                            std::cmp::Ordering::Less => match options.dictionary_key_policy {
+                                DictionaryKeyPolicy::RejectNonCanonical => {
+                                    return Err(DecodeError::UnsortedDictionaryKey);
+                                }
+                                DictionaryKeyPolicy::PreserveInput => {
+                                    warnings.push(DecodeWarning::UnsortedDictionaryKey {
+                                        key: key_bytes.clone(),
+                                        previous_key: previous_key.clone(),
+                                    });
+                                }
+                            },
+                            std::cmp::Ordering::Equal
+                                if options.dictionary_key_policy
+                                    == DictionaryKeyPolicy::RejectNonCanonical =>
+                            {
+                                return Err(DecodeError::DuplicateDictionaryKey);
+                            }
+                            std::cmp::Ordering::Greater => {}
+                            std::cmp::Ordering::Equal => {}
+                        }
+                    }
+                    if let Some(seen_keys) = &mut seen_keys
+                        && !seen_keys.insert(key_bytes.clone())
+                    {
+                        warnings.push(DecodeWarning::DuplicateDictionaryKey {
+                            key: key_bytes.clone(),
+                        });
+                    }
                     entries.push((key_bytes, value));
                     cursor = next_entry_offset;
                 }

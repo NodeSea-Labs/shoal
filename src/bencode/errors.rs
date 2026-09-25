@@ -45,6 +45,14 @@ pub enum DecodeError {
     #[error("Bencode dictionary key is not a byte string")]
     InvalidDictionaryKey,
 
+    /// Dictionary keys are not in increasing raw byte order.
+    #[error("Bencode dictionary keys are not sorted by raw byte order")]
+    UnsortedDictionaryKey,
+
+    /// A dictionary contains a key that duplicates its preceding key.
+    #[error("Bencode dictionary contains a duplicate key")]
+    DuplicateDictionaryKey,
+
     /// A dictionary key is not followed by a value.
     #[error("Bencode dictionary key is missing its value")]
     MissingDictionaryValue,
