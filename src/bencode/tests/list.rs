@@ -86,3 +86,17 @@ fn list_rejects_trailing_top_level_data() {
         Err(DecodeError::TrailingData { remaining: 2 })
     );
 }
+
+#[test]
+fn list_rejects_excessive_recursive_nesting() {
+    const MAX_DEPTH: usize = 100;
+
+    let mut input = vec![b'l'; MAX_DEPTH + 1];
+    input.extend_from_slice(b"i0e");
+    input.extend(std::iter::repeat_n(b'e', MAX_DEPTH + 1));
+
+    assert_eq!(
+        Decoder::new(&input).decode(),
+        Err(DecodeError::NestingTooDeep { limit: MAX_DEPTH })
+    );
+}

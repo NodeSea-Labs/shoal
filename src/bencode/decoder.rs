@@ -1,5 +1,8 @@
 use crate::{DecodeError, bencode::Value};
 
+/// Maximum number of nested lists and dictionaries accepted by the decoder.
+const MAX_NESTING_DEPTH: usize = 100;
+
 /// Decodes supported Bencode values from an input buffer.
 ///
 /// The decoder borrows the input while parsing, but copies each byte-string
@@ -32,7 +35,8 @@ impl<'a> Decoder<'a> {
     /// # Errors
     ///
     /// Returns an error for empty input, unsupported value markers, malformed
-    /// values, incomplete input, or bytes remaining after the decoded value.
+    /// values, incomplete input, nesting deeper than 100 containers, or bytes
+    /// remaining after the decoded value.
     pub fn decode(&self) -> Result<Value, DecodeError> {
         if self.input.is_empty() {
             return Err(DecodeError::EmptyInput);
@@ -40,7 +44,7 @@ impl<'a> Decoder<'a> {
 
         // Parse from the root, then enforce the single-value contract here;
         // nested parsers must leave following bytes available to their parent.
-        let (value, next_offset) = Self::parse_value_at(self.input, 0)?;
+        let (value, next_offset) = Self::parse_value_at(self.input, 0, 0)?;
         if next_offset < self.input.len() {
             return Err(DecodeError::TrailingData {
                 remaining: self.input.len() - next_offset,
@@ -54,7 +58,7 @@ impl<'a> Decoder<'a> {
     ///
     /// The returned offset is absolute in `input`, allowing a container parser
     /// to continue at the next value without rescanning already parsed bytes.
-    fn parse_value_at(input: &'a [u8], offset: usize) -> ParseResult {
+    fn parse_value_at(input: &'a [u8], offset: usize, nesting_depth: usize) -> ParseResult {
         let Some(&marker) = input.get(offset) else {
             return Err(DecodeError::UnexpectedEndOfInput {
                 expected: 1,
@@ -62,11 +66,16 @@ impl<'a> Decoder<'a> {
             });
         };
 
+        // Bound recursive containers before descending so hostile nesting
+        // cannot grow the call stack without limit.
         match marker {
             b'i' => Self::parse_integer_at(input, offset),
             b'0'..=b'9' => Self::parse_byte_string_at(input, offset),
-            b'l' => Self::parse_list_at(input, offset),
-            b'd' => Self::parse_dictionary_at(input, offset),
+            b'l' | b'd' if nesting_depth >= MAX_NESTING_DEPTH => Err(DecodeError::NestingTooDeep {
+                limit: MAX_NESTING_DEPTH,
+            }),
+            b'l' => Self::parse_list_at(input, offset, nesting_depth + 1),
+            b'd' => Self::parse_dictionary_at(input, offset, nesting_depth + 1),
             _ => Err(DecodeError::UnsupportedType { marker }),
         }
     }
@@ -156,7 +165,7 @@ impl<'a> Decoder<'a> {
     /// A list may contain any supported value. Each child parser advances the
     /// cursor by returning its next absolute offset; the list terminator is
     /// consumed by the list parser rather than treated as a value marker.
-    fn parse_list_at(input: &'a [u8], offset: usize) -> ParseResult {
+    fn parse_list_at(input: &'a [u8], offset: usize, nesting_depth: usize) -> ParseResult {
         if input.get(offset) != Some(&b'l') {
             return Err(DecodeError::InvalidList);
         }
@@ -175,7 +184,7 @@ impl<'a> Decoder<'a> {
                     });
                 }
                 Some(_) => {
-                    let (value, next_offset) = Self::parse_value_at(input, cursor)?;
+                    let (value, next_offset) = Self::parse_value_at(input, cursor, nesting_depth)?;
                     values.push(value);
                     // Every successful child must advance the absolute cursor;
                     // this keeps siblings parseable without copying input.
@@ -189,7 +198,7 @@ impl<'a> Decoder<'a> {
     /// terminator.
     ///
     /// The returned offset points immediately after the dictionary's `e`.
-    fn parse_dictionary_at(input: &'a [u8], offset: usize) -> ParseResult {
+    fn parse_dictionary_at(input: &'a [u8], offset: usize, nesting_depth: usize) -> ParseResult {
         if input.get(offset) != Some(&b'd') {
             return Err(DecodeError::InvalidDictionary);
         }
@@ -212,7 +221,8 @@ impl<'a> Decoder<'a> {
                     if input.get(value_offset) == Some(&b'e') {
                         return Err(DecodeError::MissingDictionaryValue);
                     }
-                    let (value, next_entry_offset) = Self::parse_value_at(input, value_offset)?;
+                    let (value, next_entry_offset) =
+                        Self::parse_value_at(input, value_offset, nesting_depth)?;
                     let Value::Bytes(key_bytes) = key else {
                         return Err(DecodeError::InvalidDictionary);
                     };

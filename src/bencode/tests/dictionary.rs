@@ -137,3 +137,22 @@ fn dictionary_rejects_trailing_top_level_data() {
         Err(DecodeError::TrailingData { remaining: 2 })
     );
 }
+
+#[test]
+fn dictionary_rejects_excessive_recursive_nesting() {
+    const MAX_DEPTH: usize = 100;
+
+    let mut input = Vec::new();
+    for _ in 0..=MAX_DEPTH {
+        input.extend_from_slice(b"d1:a");
+    }
+    input.extend_from_slice(b"i0e");
+    for _ in 0..=MAX_DEPTH {
+        input.push(b'e');
+    }
+
+    assert_eq!(
+        Decoder::new(&input).decode(),
+        Err(DecodeError::NestingTooDeep { limit: MAX_DEPTH })
+    );
+}

@@ -44,4 +44,8 @@ pub enum DecodeError {
     /// A dictionary key is not followed by a value.
     #[error("Bencode dictionary key is missing its value")]
     MissingDictionaryValue,
+
+    /// The input exceeds the maximum supported nesting depth.
+    #[error("Bencode nesting depth exceeds the limit of {limit}")]
+    NestingTooDeep { limit: usize },
 }
