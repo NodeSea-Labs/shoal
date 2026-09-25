@@ -36,4 +36,12 @@ pub enum DecodeError {
     /// A list marker was expected but not found.
     #[error("invalid Bencode list")]
     InvalidList,
+
+    /// A dictionary marker was expected but not found.
+    #[error("invalid Bencode dictionary")]
+    InvalidDictionary,
+
+    /// A dictionary key is not followed by a value.
+    #[error("Bencode dictionary key is missing its value")]
+    MissingDictionaryValue,
 }

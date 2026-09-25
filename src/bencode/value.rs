@@ -12,4 +12,6 @@ pub enum Value {
     Bytes(Bytes),
     /// A list of Bencode values.
     List(Vec<Value>),
+    /// A dictionary mapping byte strings to Bencode values.
+    Dictionary(Vec<(Bytes, Value)>),
 }

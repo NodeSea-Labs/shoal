@@ -13,7 +13,7 @@ pub struct Decoder<'a> {
 }
 
 /// A decoded value and the absolute offset of the next unread input byte.
-type ParseResult<'a> = Result<(Value, usize), DecodeError>;
+type ParseResult = Result<(Value, usize), DecodeError>;
 
 impl<'a> Decoder<'a> {
     /// Creates a decoder that borrows `input` for the lifetime `'a`.
@@ -23,9 +23,11 @@ impl<'a> Decoder<'a> {
 
     /// Decodes exactly one complete Bencode value.
     ///
-    /// Integers, byte strings, and lists are supported. Lists may contain any
-    /// supported value recursively. Byte-string payloads are copied into owned
-    /// [`bytes::Bytes`] values; the decoded value does not borrow from the input.
+    /// Integers, byte strings, lists, and dictionaries are supported. Lists
+    /// and dictionary values may contain any supported value recursively;
+    /// dictionary keys must be byte strings. Byte-string payloads are copied
+    /// into owned [`bytes::Bytes`] values, so the decoded value does not borrow
+    /// from the input.
     ///
     /// # Errors
     ///
@@ -52,7 +54,7 @@ impl<'a> Decoder<'a> {
     ///
     /// The returned offset is absolute in `input`, allowing a container parser
     /// to continue at the next value without rescanning already parsed bytes.
-    fn parse_value_at(input: &'a [u8], offset: usize) -> ParseResult<'a> {
+    fn parse_value_at(input: &'a [u8], offset: usize) -> ParseResult {
         let Some(&marker) = input.get(offset) else {
             return Err(DecodeError::UnexpectedEndOfInput {
                 expected: 1,
@@ -64,6 +66,7 @@ impl<'a> Decoder<'a> {
             b'i' => Self::parse_integer_at(input, offset),
             b'0'..=b'9' => Self::parse_byte_string_at(input, offset),
             b'l' => Self::parse_list_at(input, offset),
+            b'd' => Self::parse_dictionary_at(input, offset),
             _ => Err(DecodeError::UnsupportedType { marker }),
         }
     }
@@ -74,7 +77,7 @@ impl<'a> Decoder<'a> {
     /// returned offset remains absolute in the original input. Leading zeroes
     /// and negative zero are rejected to enforce canonical integer encoding;
     /// values outside `i64` are rejected because [`Value::Integer`] uses `i64`.
-    fn parse_integer_at(input: &'a [u8], offset: usize) -> ParseResult<'a> {
+    fn parse_integer_at(input: &'a [u8], offset: usize) -> ParseResult {
         let remaining = input.get(offset..).ok_or(DecodeError::InvalidInteger)?;
         if remaining.first() != Some(&b'i') {
             return Err(DecodeError::InvalidInteger);
@@ -110,7 +113,7 @@ impl<'a> Decoder<'a> {
     /// is sliced from the current offset because it may contain arbitrary
     /// bytes, including colons and Bencode markers. Bytes after the declared
     /// payload belong to the enclosing value and are left for its parser.
-    fn parse_byte_string_at(input: &'a [u8], offset: usize) -> ParseResult<'a> {
+    fn parse_byte_string_at(input: &'a [u8], offset: usize) -> ParseResult {
         let remaining = input
             .get(offset..)
             .ok_or(DecodeError::InvalidByteStringLength)?;
@@ -153,7 +156,7 @@ impl<'a> Decoder<'a> {
     /// A list may contain any supported value. Each child parser advances the
     /// cursor by returning its next absolute offset; the list terminator is
     /// consumed by the list parser rather than treated as a value marker.
-    fn parse_list_at(input: &'a [u8], offset: usize) -> ParseResult<'a> {
+    fn parse_list_at(input: &'a [u8], offset: usize) -> ParseResult {
         if input.get(offset) != Some(&b'l') {
             return Err(DecodeError::InvalidList);
         }
@@ -177,6 +180,44 @@ impl<'a> Decoder<'a> {
                     // Every successful child must advance the absolute cursor;
                     // this keeps siblings parseable without copying input.
                     cursor = next_offset;
+                }
+            }
+        }
+    }
+
+    /// Parses alternating byte-string keys and values until the dictionary
+    /// terminator.
+    ///
+    /// The returned offset points immediately after the dictionary's `e`.
+    fn parse_dictionary_at(input: &'a [u8], offset: usize) -> ParseResult {
+        if input.get(offset) != Some(&b'd') {
+            return Err(DecodeError::InvalidDictionary);
+        }
+
+        let mut entries = Vec::new();
+        let mut cursor = offset + 1;
+        loop {
+            match input.get(cursor) {
+                None => {
+                    return Err(DecodeError::UnexpectedEndOfInput {
+                        expected: 1,
+                        actual: 0,
+                    });
+                }
+                Some(b'e') => return Ok((Value::Dictionary(entries), cursor + 1)),
+                Some(_) => {
+                    let (key, value_offset) = Self::parse_byte_string_at(input, cursor)?;
+                    // A dictionary terminator can close the container, but it
+                    // cannot stand in for the value paired with this key.
+                    if input.get(value_offset) == Some(&b'e') {
+                        return Err(DecodeError::MissingDictionaryValue);
+                    }
+                    let (value, next_entry_offset) = Self::parse_value_at(input, value_offset)?;
+                    let Value::Bytes(key_bytes) = key else {
+                        return Err(DecodeError::InvalidDictionary);
+                    };
+                    entries.push((key_bytes, value));
+                    cursor = next_entry_offset;
                 }
             }
         }

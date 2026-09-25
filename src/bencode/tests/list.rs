@@ -74,8 +74,8 @@ fn list_rejects_missing_terminator() {
 #[test]
 fn list_rejects_unsupported_child_type() {
     assert_eq!(
-        Decoder::new(b"ld").decode(),
-        Err(DecodeError::UnsupportedType { marker: b'd' })
+        Decoder::new(b"lx").decode(),
+        Err(DecodeError::UnsupportedType { marker: b'x' })
     );
 }
 
