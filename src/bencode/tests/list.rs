@@ -100,3 +100,14 @@ fn list_rejects_excessive_recursive_nesting() {
         Err(DecodeError::NestingTooDeep { limit: MAX_DEPTH })
     );
 }
+
+#[test]
+fn list_accepts_nesting_at_the_limit() {
+    const MAX_DEPTH: usize = 100;
+
+    let mut input = vec![b'l'; MAX_DEPTH];
+    input.extend_from_slice(b"i0e");
+    input.extend(std::iter::repeat_n(b'e', MAX_DEPTH));
+
+    assert!(Decoder::new(&input).decode().is_ok());
+}

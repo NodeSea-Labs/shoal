@@ -170,3 +170,17 @@ fn dictionary_rejects_excessive_recursive_nesting() {
         Err(DecodeError::NestingTooDeep { limit: MAX_DEPTH })
     );
 }
+
+#[test]
+fn dictionary_accepts_nesting_at_the_limit() {
+    const MAX_DEPTH: usize = 100;
+
+    let mut input = Vec::new();
+    for _ in 0..MAX_DEPTH {
+        input.extend_from_slice(b"d1:a");
+    }
+    input.extend_from_slice(b"i0e");
+    input.extend(std::iter::repeat_n(b'e', MAX_DEPTH));
+
+    assert!(Decoder::new(&input).decode().is_ok());
+}
