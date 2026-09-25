@@ -65,3 +65,15 @@ pub enum DecodeError {
     #[error("Bencode token count exceeds the limit of {limit}")]
     TokenLimitExceeded { limit: usize },
 }
+
+/// An error returned when a value cannot be encoded as canonical Bencode.
+#[derive(Debug, PartialEq, Eq, thiserror::Error)]
+pub enum EncodeError {
+    /// A dictionary contains multiple entries with the same byte-string key.
+    #[error("Bencode dictionary contains a duplicate key: {key:?}")]
+    DuplicateDictionaryKey { key: bytes::Bytes },
+
+    /// The value exceeds the configured maximum container depth.
+    #[error("Bencode nesting depth exceeds the limit of {limit}")]
+    NestingTooDeep { limit: usize },
+}

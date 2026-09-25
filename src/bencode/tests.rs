@@ -1,5 +1,6 @@
 mod bytes;
 mod dictionary;
+mod encoder;
 mod integer;
 mod list;
 
